@@ -3,10 +3,255 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wasm Grep App</title>
+    <title>⚡ 超高速 Wasm Grep 検索</title>
+    <!-- ZIP解凍用ライブラリ JSZip の読み込み -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --text-color: #1e293b;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            padding: 15px;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            max-width: 900px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        h2 { margin-top: 0; color: var(--primary-color); }
+        .box {
+            background: var(--card-bg);
+            border: 1px solid #e2e8f0;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+
+        .flex-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            min-width: 200px;
+            padding: 10px 12px;
+            font-size: 16px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+        }
+
+        button {
+            padding: 10px 18px;
+            font-size: 16px;
+            font-weight: bold;
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        button:disabled { background-color: #94a3b8; cursor: not-allowed; }
+
+        .status {
+            font-size: 14px;
+            color: #64748b;
+            margin-top: 8px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: bold;
+            background: #e2e8f0;
+            color: #475569;
+        }
+        .badge.success { background: #dcfce7; color: #166534; }
+
+        #results {
+            background: #0f172a;
+            color: #38bdf8;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            padding: 12px;
+            border-radius: 8px;
+            height: 450px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+    </style>
 </head>
 <body>
-    <h1>⚡ Wasm Grep App</h1>
-    <p>GitHub Pages のセットアップが完了しました！</p>
+
+    <h2>⚡ 超高速 Wasm Grep 検索</h2>
+
+    <!-- ステータス表示エリア -->
+    <div class="box">
+        <div class="flex-row">
+            <strong>データ状態:</strong>
+            <span id="dataBadge" class="badge">確認中...</span>
+        </div>
+        <div id="fileStatus" class="status">初期化中...</div>
+    </div>
+
+    <!-- 検索操作エリア -->
+    <div class="box">
+        <div class="flex-row">
+            <input type="text" id="patternInput" placeholder="正規表現パターン (例: ERROR_\d+)" disabled>
+            <button id="searchBtn" disabled>検索</button>
+        </div>
+        <div class="flex-row" style="margin-top: 10px;">
+            <label><input type="checkbox" id="ignoreCase"> 大/小文字を区別しない</label>
+        </div>
+        <div id="searchStatus" class="status">Wasmを初期化中...</div>
+    </div>
+
+    <h3>検索結果</h3>
+    <div id="results">結果がここに表示されます...</div>
+
+    <script>
+        const DEFAULT_ZIP_URL = './data.zip'; // アップロードしたZIPファイルのパス
+        const DB_NAME = 'WasmGrepDB';
+        const STORE_NAME = 'textDataStore';
+        const KEY_NAME = 'default_text_data';
+
+        // --- IndexedDB ヘルパー ---
+        function openDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, 1);
+                request.onupgradeneeded = (e) => {
+                    const db = e.target.result;
+                    if (!db.objectStoreNames.contains(STORE_NAME)) {
+                        db.createObjectStore(STORE_NAME);
+                    }
+                };
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        async function saveTextToDB(text) {
+            const db = await openDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(STORE_NAME, 'readwrite');
+                tx.objectStore(STORE_NAME).put(text, KEY_NAME);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+
+        async function loadTextFromDB() {
+            const db = await openDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(STORE_NAME, 'readonly');
+                const req = tx.objectStore(STORE_NAME).get(KEY_NAME);
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+        }
+
+        // --- アプリ制御 ---
+        let loadedTextData = "";
+        const worker = new Worker('worker.js', { type: 'module' });
+
+        const patternInput = document.getElementById('patternInput');
+        const searchBtn = document.getElementById('searchBtn');
+        const fileStatus = document.getElementById('fileStatus');
+        const searchStatus = document.getElementById('searchStatus');
+        const dataBadge = document.getElementById('dataBadge');
+        const resultsDiv = document.getElementById('results');
+
+        // ZIPダウンロード ＆ 自動解凍処理
+        async function loadData() {
+            try {
+                // 1. まずIndexedDBからキャッシュを探す
+                let text = await loadTextFromDB();
+                
+                if (text) {
+                    fileStatus.textContent = 'ブラウザのキャッシュ（IndexedDB）からデータを読み込みました。';
+                } else {
+                    // 2. キャッシュがなければ data.zip をダウンロード
+                    fileStatus.textContent = '初期データをダウンロード中 (ZIP圧縮済み)...';
+                    const response = await fetch(DEFAULT_ZIP_URL);
+                    if (!response.ok) throw new Error('data.zip の取得に失敗しました');
+                    
+                    const zipBuffer = await response.arrayBuffer();
+                    
+                    // 3. JSZipで解凍処理
+                    fileStatus.textContent = 'データ解凍中...';
+                    const zip = await JSZip.loadAsync(zipBuffer);
+                    
+                    // ZIP内の最初のテキストファイルを取得
+                    const zipFile = Object.values(zip.files).find(f => !f.dir);
+                    if (!zipFile) throw new Error('ZIP内にファイルが見つかりません');
+
+                    text = await zipFile.async('string');
+                    
+                    // 4. 解凍したテキストを次回のためにIndexedDBへ保存
+                    fileStatus.textContent = '解凍完了！次回高速化のためキャッシュ保存中...';
+                    await saveTextToDB(text);
+                    fileStatus.textContent = '初期データの準備が完了しました！';
+                }
+
+                loadedTextData = text;
+                dataBadge.textContent = "準備完了";
+                dataBadge.className = "badge success";
+                patternInput.disabled = false;
+                searchBtn.disabled = false;
+
+            } catch (err) {
+                fileStatus.textContent = `エラー: ${err.message}`;
+                dataBadge.textContent = "読み込み失敗";
+            }
+        }
+
+        // Worker応答処理
+        worker.onmessage = (e) => {
+            const data = e.data;
+            if (data.type === 'READY') {
+                searchStatus.textContent = '検索エンジン準備完了（Wasmロード完了）';
+                loadData();
+            } else if (data.type === 'RESULTS') {
+                searchStatus.textContent = `検索完了: ${data.count} 件ヒット (${data.timeMs} ms)`;
+                resultsDiv.textContent = data.results.length === 0
+                    ? "該当する行は見つかりませんでした。"
+                    : data.results.map(r => `L${r.line_number}: ${r.text}`).join('\n');
+            } else if (data.type === 'ERROR') {
+                searchStatus.textContent = `エラー: ${data.error}`;
+            }
+        };
+
+        // 検索実行
+        function runSearch() {
+            const pattern = patternInput.value;
+            if (!pattern || !loadedTextData) return;
+
+            searchStatus.textContent = '検索中...';
+            worker.postMessage({
+                action: 'SEARCH',
+                text: loadedTextData,
+                pattern: pattern,
+                ignoreCase: document.getElementById('ignoreCase').checked
+            });
+        }
+
+        searchBtn.addEventListener('click', runSearch);
+        patternInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') runSearch(); });
+    </script>
 </body>
 </html>
