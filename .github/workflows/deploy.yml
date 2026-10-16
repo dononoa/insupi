@@ -1,0 +1,51 @@
+name: Deploy Wasm Grep App to GitHub Pages
+
+on:
+  push:
+    branches: [ main ] # mainブランチに更新があったら自動実行
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. リポジトリのコードを取得
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Rust環境のセットアップ
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # 3. wasm-pack のインストール
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      # 4. Wasmのビルド処理 (pkg/ フォルダに出力)
+      - name: Build Wasm
+        run: wasm-pack build --target web --release
+
+      # 5. GitHub Pages 向けのデプロイ準備
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      # 6. アセットのアップロード
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.' # リポジトリ全体（pkg/やindex.html等）を公開対象にする
+
+      # 7. GitHub Pagesへ公開
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
